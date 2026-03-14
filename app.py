@@ -14,19 +14,10 @@ load_dotenv()
 app = Flask(__name__)
 
 # --- CORS CONFIGURATION ---
-# Allows connection from Vercel and local development ports
-CORS(app, resources={r"/*": {
-    "origins": [
-        "https://plagirism-frontned.vercel.app", 
-        "http://localhost:3000", 
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173"
-    ]
-}}, supports_credentials=True)
+# "origins": "*" ensures no "Server connection failed" errors due to CORS
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # --- APP CONFIG ---
-# Added &tlsAllowInvalidCertificates=true to prevent local DNS/SSL timeouts
 mongo_uri = os.getenv('MONGO_URI', '').strip()
 if "tlsAllowInvalidCertificates" not in mongo_uri:
     mongo_uri += "&tlsAllowInvalidCertificates=true"
@@ -98,12 +89,10 @@ def login():
 @jwt_required()
 def analyze():
     try:
-        # Move heavy imports inside to ensure fast app startup
         import nltk
         from sklearn.metrics.pairwise import cosine_similarity
         import google.generativeai as genai
         
-        # Ensure NLTK resources are available
         try:
             nltk.data.find('tokenizers/punkt')
         except LookupError:
@@ -114,7 +103,6 @@ def analyze():
         user_email = get_jwt_identity()
         text_content = ""
 
-        # 1. Extraction
         if 'file' in request.files:
             file = request.files['file']
             if file.filename.endswith('.pdf'):
@@ -131,7 +119,6 @@ def analyze():
         text_content = " ".join(text_content.split())
         sentences = nltk.sent_tokenize(text_content)
         
-        # 2. Comparison
         previous_scans = list(mongo.db.scans.find({}, {"text": 1}).limit(20))
         all_prev_text = " ".join([s.get('text', '') for s in previous_scans if s.get('text')])
         prev_sentences = nltk.sent_tokenize(all_prev_text) if all_prev_text else []
@@ -154,7 +141,7 @@ def analyze():
 
         score = int((total_plagiarized_count / len(detailed_analysis)) * 100) if detailed_analysis else 0
 
-        # 3. Gemini Insights
+        # Gemini Insights
         ai_insight = "Highly original content."
         try:
             genai.configure(api_key=os.getenv('GEMINI_API_KEY', 'AIzaSyBiRuD5rmvmUTVecNY335pC85p3Z81Zj5E'))
@@ -165,7 +152,6 @@ def analyze():
         except:
             ai_insight = "Gemini insight unavailable."
 
-        # 4. Save to DB
         mongo.db.scans.insert_one({
             "user_email": user_email, 
             "text": text_content, 
@@ -185,9 +171,13 @@ def analyze():
     except Exception as e:
         return jsonify({"msg": str(e)}), 500
 
-@app.route('/history', methods=['GET'])
+# FIXED: Added POST method to prevent 405 Errors when frontend dashboard loads
+@app.route('/history', methods=['GET', 'POST'])
 @jwt_required()
 def get_history():
+    if request.method == 'POST':
+        return jsonify({"msg": "Use /analyze for new scans"}), 200
+        
     try:
         user_email = get_jwt_identity()
         scans = mongo.db.scans.find({"user_email": user_email}).sort("timestamp", -1)
@@ -224,6 +214,5 @@ def profile():
         return jsonify({"msg": "Profile updated"}), 200
 
 if __name__ == '__main__':
-    # Use environment PORT or default to 5000
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
