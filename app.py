@@ -20,15 +20,25 @@ load_dotenv()
 # --- INITIALIZE AI MODELS ---
 print("⏳ Preparing AI Environment...")
 
-# USE A LIGHTER MODEL FOR FAST DEPLOYMENT
-print("⏳ Loading Light Semantic Model...")
-ai_model = SentenceTransformer('all-MiniLM-L12-v2')
+# Lazy loading variables
+ai_model = None 
 
-# --- ADDED YOUR API KEY HERE ---
+def get_ai_model():
+    """Loads the model only when the first scan is requested."""
+    global ai_model
+    if ai_model is None:
+        print("⏳ First scan detected: Loading Semantic Model (all-MiniLM-L12-v2)...")
+        # Using the L12 version as it is a good balance of speed and accuracy
+        ai_model = SentenceTransformer('all-MiniLM-L12-v2')
+        print("✅ AI Model Loaded successfully.")
+    return ai_model
+
+# Configure Gemini
 GEMINI_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyBiRuD5rmvmUTVecNY335pC85p3Z81Zj5E')
 genai.configure(api_key=GEMINI_KEY)
 gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-print("✅ AI Models Ready.")
+
+print("✅ Backend Ready (AI will load on first request).")
 
 app = Flask(__name__)
 
@@ -40,7 +50,6 @@ app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'fallback-secret').strip(
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=5) 
 
 mongo = PyMongo(app)
-
 bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
@@ -75,6 +84,9 @@ def login():
 @jwt_required()
 def analyze():
     try:
+        # Load model here (Lazy Loading)
+        model = get_ai_model()
+        
         user_email = get_jwt_identity()
         text_content = ""
 
@@ -102,8 +114,9 @@ def analyze():
         total_plagiarized_count = 0
         
         if prev_sentences:
-            curr_embeddings = ai_model.encode(sentences)
-            prev_embeddings = ai_model.encode(prev_sentences)
+            # Using the locally defined 'model' from Lazy Loading
+            curr_embeddings = model.encode(sentences)
+            prev_embeddings = model.encode(prev_sentences)
             sim_matrix = cosine_similarity(curr_embeddings, prev_embeddings)
 
             for i, s in enumerate(sentences):
@@ -152,6 +165,23 @@ def get_history():
         return jsonify(output), 200
     except Exception as e:
         return jsonify({"msg": str(e)}), 500
+
+@app.route('/profile', methods=['GET', 'PUT'])
+@jwt_required()
+def profile():
+    user_email = get_jwt_identity()
+    user = mongo.db.users.find_one({"email": user_email})
+    if not user: return jsonify({"msg": "User not found"}), 404
+    if request.method == 'GET':
+        return jsonify({
+            "name": user.get('name', 'N/A'), 
+            "email": user.get('email'), 
+            "scans": user.get('scans_count', 0)
+        }), 200
+    if request.method == 'PUT':
+        data = request.json
+        mongo.db.users.update_one({"email": user_email}, {"$set": {"name": data.get('name')}})
+        return jsonify({"msg": "Profile updated"}), 200
 
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
