@@ -211,5 +211,6 @@ def get_history():
         return jsonify({"msg": str(e)}), 500
 
 if __name__ == '__main__':
-    # use_reloader=False is safer when loading large AI models
-    app.run(debug=True, port=5000, use_reloader=False)
+    # This line is the magic fix for Render
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
