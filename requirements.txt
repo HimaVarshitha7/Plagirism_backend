@@ -1,7 +1,12 @@
 flask
-flask-cors
-flask-pymongo
 flask-bcrypt
+flask-cors
 flask-jwt-extended
-joblib
+flask-pymongo
+python-dotenv
+pdfplumber
+sentence-transformers
 scikit-learn
+nltk
+google-generativeai
+gunicorn
