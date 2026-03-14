@@ -1,217 +1,377 @@
 import os
-import re
-import random
-import sys
-import io
 import pdfplumber
 from datetime import datetime, timedelta
+
 from flask import Flask, request, jsonify
 from flask_bcrypt import Bcrypt
 from flask_cors import CORS
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import (
+    JWTManager,
+    create_access_token,
+    jwt_required,
+    get_jwt_identity,
+)
 from flask_pymongo import PyMongo
 from dotenv import load_dotenv
-from pymongo.errors import ConnectionFailure
 
-# --- AI & SEMANTIC IMPORTS ---
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 import nltk
+from sklearn.metrics.pairwise import cosine_similarity
 import google.generativeai as genai
 
 load_dotenv()
 
-# --- INITIALIZE AI MODELS ---
-print("⏳ Loading NLTK resources...")
-nltk.download('punkt')
-nltk.download('punkt_tab')
+# -----------------------------
+# NLTK SAFE LOAD
+# -----------------------------
+try:
+    nltk.data.find("tokenizers/punkt")
+except LookupError:
+    nltk.download("punkt")
 
-print("⏳ Loading Sentence Transformer (all-MiniLM-L6-v2)...")
-# This loads the model. On the first run, it will download ~80MB.
-ai_model = SentenceTransformer('all-MiniLM-L6-v2')
+# -----------------------------
+# LAZY LOAD AI MODEL
+# -----------------------------
+ai_model = None
 
-# Configure Gemini
-GEMINI_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyBiRuD5rmvmUTVecNY335pC85p3Z81Zj5E')
-genai.configure(api_key=GEMINI_KEY)
-gemini_model = genai.GenerativeModel("gemini-1.5-flash")
-print("✅ AI Models Ready.")
 
-# --- DATABASE CONFIG ---
-mongo_uri = os.getenv('MONGO_URI', '').strip()
-if not mongo_uri:
-    print("⚠️ CRITICAL ERROR: MONGO_URI not found in .env file!")
+def get_ai_model():
+    global ai_model
+    if ai_model is None:
+        print("Loading SentenceTransformer model...")
+        from sentence_transformers import SentenceTransformer
 
+        ai_model = SentenceTransformer("all-MiniLM-L6-v2")
+        print("AI model ready")
+
+    return ai_model
+
+
+# -----------------------------
+# GEMINI SETUP
+# -----------------------------
+GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+
+if GEMINI_KEY:
+    genai.configure(api_key=GEMINI_KEY)
+    gemini_model = genai.GenerativeModel("gemini-1.5-flash")
+else:
+    gemini_model = None
+
+
+# -----------------------------
+# FLASK APP
+# -----------------------------
 app = Flask(__name__)
-# Relaxed CORS for Hackathon development
-# Replace the old CORS line with this one:
-CORS(app, resources={r"/*": {"origins": ["https://plagirism-frontned.vercel.app"]}}, supports_credentials=True)
 
-app.config['MONGO_URI'] = mongo_uri
-app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'fallback-secret').strip()
-app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=5) 
+CORS(
+    app,
+    resources={r"/*": {"origins": ["https://plagirism-frontned.vercel.app"]}},
+    supports_credentials=True,
+)
+
+app.config["MONGO_URI"] = os.getenv("MONGO_URI")
+app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET")
+app.config["JWT_ACCESS_TOKEN_EXPIRES"] = timedelta(hours=5)
 
 mongo = PyMongo(app)
-
-# --- CONNECTION CHECK ---
-try:
-    mongo.cx.admin.command('ping')
-    print("✅ MongoDB Connected Successfully!")
-except Exception as e:
-    print(f"❌ MongoDB Connection Failed: {e}")
-
 bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
-# --- AUTH ROUTES ---
-@app.route('/register', methods=['POST'])
+# -----------------------------
+# DB CONNECTION TEST
+# -----------------------------
+try:
+    mongo.cx.admin.command("ping")
+    print("MongoDB connected")
+except Exception as e:
+    print("MongoDB error:", e)
+
+
+# -----------------------------
+# REGISTER
+# -----------------------------
+@app.route("/register", methods=["POST"])
 def register():
     try:
         data = request.json
-        if mongo.db.users.find_one({"email": data.get('email')}):
+
+        if mongo.db.users.find_one({"email": data.get("email")}):
             return jsonify({"msg": "User already exists"}), 400
-        hashed_pw = bcrypt.generate_password_hash(data.get('password')).decode('utf-8')
-        mongo.db.users.insert_one({
-            "name": data.get('name'), "email": data.get('email'), "password": hashed_pw,
-            "scans_count": 0, "created_at": datetime.utcnow()
-        })
+
+        hashed_pw = bcrypt.generate_password_hash(data["password"]).decode("utf-8")
+
+        mongo.db.users.insert_one(
+            {
+                "name": data["name"],
+                "email": data["email"],
+                "password": hashed_pw,
+                "scans_count": 0,
+                "created_at": datetime.utcnow(),
+            }
+        )
+
         return jsonify({"msg": "User created"}), 201
+
     except Exception as e:
         return jsonify({"msg": str(e)}), 500
 
-@app.route('/login', methods=['POST'])
+
+# -----------------------------
+# LOGIN
+# -----------------------------
+@app.route("/login", methods=["POST"])
 def login():
     try:
         data = request.json
-        user = mongo.db.users.find_one({"email": data.get('email')})
-        if user and bcrypt.check_password_hash(user['password'], data.get('password')):
-            token = create_access_token(identity=str(user['email']))
-            return jsonify({"access_token": token, "user": {"name": user['name'], "email": user['email']}}), 200
+
+        user = mongo.db.users.find_one({"email": data.get("email")})
+
+        if user and bcrypt.check_password_hash(user["password"], data.get("password")):
+
+            token = create_access_token(identity=user["email"])
+
+            return jsonify(
+                {
+                    "access_token": token,
+                    "user": {"name": user["name"], "email": user["email"]},
+                }
+            )
+
         return jsonify({"msg": "Invalid credentials"}), 401
+
     except Exception as e:
         return jsonify({"msg": str(e)}), 500
 
-@app.route('/profile', methods=['GET', 'PUT'])
+
+# -----------------------------
+# PROFILE
+# -----------------------------
+@app.route("/profile", methods=["GET", "PUT"])
 @jwt_required()
 def profile():
     user_email = get_jwt_identity()
-    user = mongo.db.users.find_one({"email": user_email})
-    if not user: return jsonify({"msg": "User not found"}), 404
-    if request.method == 'GET':
-        return jsonify({
-            "name": user.get('name', 'N/A'), 
-            "email": user.get('email'), 
-            "scans": user.get('scans_count', 0)
-        }), 200
-    if request.method == 'PUT':
-        data = request.json
-        mongo.db.users.update_one({"email": user_email}, {"$set": {"name": data.get('name')}})
-        return jsonify({"msg": "Profile updated"}), 200
 
-# --- ANALYZE PART (SEMANTIC AI) ---
-@app.route('/analyze', methods=['POST'])
+    user = mongo.db.users.find_one({"email": user_email})
+
+    if not user:
+        return jsonify({"msg": "User not found"}), 404
+
+    if request.method == "GET":
+
+        return jsonify(
+            {
+                "name": user.get("name"),
+                "email": user.get("email"),
+                "scans": user.get("scans_count", 0),
+            }
+        )
+
+    if request.method == "PUT":
+
+        data = request.json
+
+        mongo.db.users.update_one(
+            {"email": user_email},
+            {"$set": {"name": data.get("name")}},
+        )
+
+        return jsonify({"msg": "Profile updated"})
+
+
+# -----------------------------
+# ANALYZE DOCUMENT
+# -----------------------------
+@app.route("/analyze", methods=["POST"])
 @jwt_required()
 def analyze():
     try:
         user_email = get_jwt_identity()
+
         text_content = ""
 
-        # 1. Content Extraction
-        if 'file' in request.files:
-            file = request.files['file']
-            if file.filename.endswith('.pdf'):
-                with pdfplumber.open(file) as pdf:
-                    text_content = " ".join([page.extract_text() for page in pdf.pages if page.extract_text()])
-            else:
-                text_content = file.read().decode('utf-8')
-        else:
-            text_content = request.form.get('text', '')
+        # -------- FILE INPUT --------
+        if "file" in request.files:
 
-        if not text_content or not text_content.strip():
-            return jsonify({"msg": "No text content found."}), 400
+            file = request.files["file"]
+
+            if file.filename.endswith(".pdf"):
+
+                with pdfplumber.open(file) as pdf:
+
+                    text_content = " ".join(
+                        [
+                            page.extract_text()
+                            for page in pdf.pages
+                            if page.extract_text()
+                        ]
+                    )
+
+            else:
+                text_content = file.read().decode("utf-8")
+
+        else:
+            # -------- JSON OR FORM --------
+            if request.is_json:
+                data = request.get_json()
+                text_content = data.get("text", "")
+            else:
+                text_content = request.form.get("text", "")
+
+        print("Received text length:", len(text_content))
+
+        if not text_content.strip():
+            return jsonify({"msg": "No text content received"}), 400
 
         text_content = " ".join(text_content.split())
+
         sentences = nltk.sent_tokenize(text_content)
-        
-        # 2. Compare against Database (Safe Retrieval)
-        # We use .get('text') to avoid the KeyError 'text' if old data is buggy
-        previous_scans = list(mongo.db.scans.find({}, {"text": 1}).limit(50))
-        all_prev_text = " ".join([s.get('text', '') for s in previous_scans if s.get('text')])
-        prev_sentences = nltk.sent_tokenize(all_prev_text) if all_prev_text else []
+
+        # -------- PREVIOUS SCANS --------
+        previous_scans = list(
+            mongo.db.scans.find({}, {"text": 1}).limit(50)
+        )
+
+        prev_text = " ".join(
+            [s.get("text", "") for s in previous_scans if s.get("text")]
+        )
+
+        prev_sentences = nltk.sent_tokenize(prev_text) if prev_text else []
 
         detailed_analysis = []
-        total_plagiarized_count = 0
-        
+        plag_count = 0
+
+        model = get_ai_model()
+
+        # -------- SIMILARITY CHECK --------
         if prev_sentences:
-            curr_embeddings = ai_model.encode(sentences)
-            prev_embeddings = ai_model.encode(prev_sentences)
+
+            curr_embeddings = model.encode(sentences)
+            prev_embeddings = model.encode(prev_sentences)
+
             sim_matrix = cosine_similarity(curr_embeddings, prev_embeddings)
 
-            for i, s in enumerate(sentences):
-                # Find best match in database
-                max_sim = max(sim_matrix[i]) if len(prev_sentences) > 0 else 0
-                is_plag = bool(max_sim > 0.75) 
-                
-                if is_plag: total_plagiarized_count += 1
-                detailed_analysis.append({"text": s, "isPlagiarized": is_plag})
+            for i, sentence in enumerate(sentences):
+
+                max_sim = max(sim_matrix[i])
+
+                is_plag = max_sim > 0.75
+
+                if is_plag:
+                    plag_count += 1
+
+                detailed_analysis.append(
+                    {"text": sentence, "isPlagiarized": bool(is_plag)}
+                )
+
         else:
-            # First scan in database
-            detailed_analysis = [{"text": s, "isPlagiarized": False} for s in sentences]
 
-        score = int((total_plagiarized_count / len(detailed_analysis)) * 100) if detailed_analysis else 0
+            detailed_analysis = [
+                {"text": s, "isPlagiarized": False} for s in sentences
+            ]
 
-        # 3. AI Insights via Gemini
-        ai_insight = "Document appears highly original based on current records."
-        if score > 15:
+        score = int((plag_count / len(sentences)) * 100) if sentences else 0
+
+        # -------- GEMINI INSIGHT --------
+        ai_insight = "Document appears original."
+
+        if score > 15 and gemini_model:
+
             try:
-                prompt = f"Analyze this plagiarism report. Score: {score}%. Text snippet: {text_content[:600]}. Briefly explain why this might be flagged."
+
+                prompt = f"""
+Analyze this plagiarism result.
+
+Score: {score}%
+
+Text snippet:
+{text_content[:600]}
+
+Explain briefly why plagiarism might be detected.
+"""
+
                 response = gemini_model.generate_content(prompt)
+
                 ai_insight = response.text
-            except:
-                ai_insight = "AI explanation unavailable at this moment."
 
-        # 4. Save & Update
-        mongo.db.scans.insert_one({
-            "user_email": user_email,
-            "text": text_content,
-            "score": score,
-            "analysis": detailed_analysis,
-            "ai_insight": ai_insight,
-            "timestamp": datetime.utcnow()
-        })
-        mongo.db.users.update_one({"email": user_email}, {"$inc": {"scans_count": 1}})
+            except Exception as e:
+                print("Gemini error:", e)
 
-        return jsonify({
-            "percentage": score,
-            "analysis": detailed_analysis,
-            "extracted_text": text_content,
-            "ai_insight": ai_insight
-        })
+        # -------- SAVE SCAN --------
+        mongo.db.scans.insert_one(
+            {
+                "user_email": user_email,
+                "text": text_content,
+                "score": score,
+                "analysis": detailed_analysis,
+                "ai_insight": ai_insight,
+                "timestamp": datetime.utcnow(),
+            }
+        )
+
+        mongo.db.users.update_one(
+            {"email": user_email},
+            {"$inc": {"scans_count": 1}},
+        )
+
+        return jsonify(
+            {
+                "percentage": score,
+                "analysis": detailed_analysis,
+                "extracted_text": text_content,
+                "ai_insight": ai_insight,
+            }
+        )
+
     except Exception as e:
-        print(f"❌ Error in analyze: {e}")
+
+        print("Analyze error:", e)
+
         return jsonify({"msg": str(e)}), 500
 
-@app.route('/history', methods=['GET'])
+
+# -----------------------------
+# HISTORY
+# -----------------------------
+@app.route("/history", methods=["GET"])
 @jwt_required()
-def get_history():
+def history():
     try:
+
         user_email = get_jwt_identity()
-        scans = mongo.db.scans.find({"user_email": user_email}).sort("timestamp", -1)
+
+        scans = mongo.db.scans.find(
+            {"user_email": user_email}
+        ).sort("timestamp", -1)
+
         output = []
+
         for s in scans:
-            output.append({
-                "id": str(s['_id']),
-                "full_text": s.get('text', 'No content'), 
-                "score": s.get('score', 0),
-                "analysis": s.get('analysis', []),
-                "ai_insight": s.get('ai_insight', ''),
-                "date": s.get('timestamp').strftime("%Y-%m-%d") if s.get('timestamp') else "N/A"
-            })
-        return jsonify(output), 200
+
+            output.append(
+                {
+                    "id": str(s["_id"]),
+                    "full_text": s.get("text", ""),
+                    "score": s.get("score", 0),
+                    "analysis": s.get("analysis", []),
+                    "ai_insight": s.get("ai_insight", ""),
+                    "date": s["timestamp"].strftime("%Y-%m-%d")
+                    if s.get("timestamp")
+                    else "N/A",
+                }
+            )
+
+        return jsonify(output)
+
     except Exception as e:
-        print(f"❌ Error in history: {e}")
+
         return jsonify({"msg": str(e)}), 500
 
-if __name__ == '__main__':
-    # This line is the magic fix for Render
+
+# -----------------------------
+# SERVER START
+# -----------------------------
+if __name__ == "__main__":
+
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port)
+
+    app.run(host="0.0.0.0", port=port)
