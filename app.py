@@ -78,6 +78,7 @@ mongo = PyMongo(app)
 bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
+
 # -----------------------------
 # HEALTH ROUTE
 # -----------------------------
@@ -85,8 +86,9 @@ jwt = JWTManager(app)
 def health():
     return {"status": "server running"}
 
+
 # -----------------------------
-# DB CHECK
+# DB CONNECTION TEST
 # -----------------------------
 try:
     mongo.cx.admin.command("ping")
@@ -94,18 +96,22 @@ try:
 except Exception as e:
     print("MongoDB error:", e)
 
+
 # -----------------------------
 # REGISTER
 # -----------------------------
 @app.route("/register", methods=["POST"])
 def register():
+
     try:
         data = request.json
 
         if mongo.db.users.find_one({"email": data.get("email")}):
             return jsonify({"msg": "User already exists"}), 400
 
-        hashed_pw = bcrypt.generate_password_hash(data["password"]).decode("utf-8")
+        hashed_pw = bcrypt.generate_password_hash(
+            data["password"]
+        ).decode("utf-8")
 
         mongo.db.users.insert_one({
             "name": data["name"],
@@ -126,18 +132,24 @@ def register():
 # -----------------------------
 @app.route("/login", methods=["POST"])
 def login():
+
     try:
         data = request.json
 
         user = mongo.db.users.find_one({"email": data.get("email")})
 
-        if user and bcrypt.check_password_hash(user["password"], data.get("password")):
+        if user and bcrypt.check_password_hash(
+            user["password"], data.get("password")
+        ):
 
             token = create_access_token(identity=user["email"])
 
             return jsonify({
                 "access_token": token,
-                "user": {"name": user["name"], "email": user["email"]},
+                "user": {
+                    "name": user["name"],
+                    "email": user["email"]
+                }
             })
 
         return jsonify({"msg": "Invalid credentials"}), 401
@@ -147,7 +159,40 @@ def login():
 
 
 # -----------------------------
-# ANALYZE
+# PROFILE
+# -----------------------------
+@app.route("/profile", methods=["GET", "PUT"])
+@jwt_required()
+def profile():
+
+    user_email = get_jwt_identity()
+    user = mongo.db.users.find_one({"email": user_email})
+
+    if not user:
+        return jsonify({"msg": "User not found"}), 404
+
+    if request.method == "GET":
+
+        return jsonify({
+            "name": user.get("name"),
+            "email": user.get("email"),
+            "scans": user.get("scans_count", 0),
+        })
+
+    if request.method == "PUT":
+
+        data = request.json
+
+        mongo.db.users.update_one(
+            {"email": user_email},
+            {"$set": {"name": data.get("name")}},
+        )
+
+        return jsonify({"msg": "Profile updated"})
+
+
+# -----------------------------
+# ANALYZE DOCUMENT
 # -----------------------------
 @app.route("/analyze", methods=["POST"])
 @jwt_required()
@@ -157,6 +202,7 @@ def analyze():
         user_email = get_jwt_identity()
         text_content = ""
 
+        # File upload
         if "file" in request.files:
 
             file = request.files["file"]
@@ -164,6 +210,7 @@ def analyze():
             if file.filename.endswith(".pdf"):
 
                 with pdfplumber.open(file) as pdf:
+
                     text_content = " ".join(
                         page.extract_text()
                         for page in pdf.pages
@@ -174,6 +221,7 @@ def analyze():
                 text_content = file.read().decode("utf-8")
 
         else:
+
             if request.is_json:
                 data = request.get_json()
                 text_content = data.get("text", "")
@@ -202,10 +250,17 @@ def analyze():
 
         if prev_sentences:
 
-            curr_embeddings = model.encode(sentences, convert_to_numpy=True)
-            prev_embeddings = model.encode(prev_sentences, convert_to_numpy=True)
+            curr_embeddings = model.encode(
+                sentences, convert_to_numpy=True
+            )
 
-            sim_matrix = cosine_similarity(curr_embeddings, prev_embeddings)
+            prev_embeddings = model.encode(
+                prev_sentences, convert_to_numpy=True
+            )
+
+            sim_matrix = cosine_similarity(
+                curr_embeddings, prev_embeddings
+            )
 
             for i, sentence in enumerate(sentences):
 
@@ -223,7 +278,8 @@ def analyze():
         else:
 
             detailed_analysis = [
-                {"text": s, "isPlagiarized": False} for s in sentences
+                {"text": s, "isPlagiarized": False}
+                for s in sentences
             ]
 
         score = int((plag_count / len(sentences)) * 100) if sentences else 0
@@ -232,7 +288,9 @@ def analyze():
 
         if score > 15 and gemini_model:
 
-            prompt = f"""
+            try:
+
+                prompt = f"""
 Score: {score}%
 
 Text snippet:
@@ -241,8 +299,12 @@ Text snippet:
 Explain briefly why plagiarism might be detected.
 """
 
-            response = gemini_model.generate_content(prompt)
-            ai_insight = response.text
+                response = gemini_model.generate_content(prompt)
+
+                ai_insight = response.text
+
+            except Exception as e:
+                print("Gemini error:", e)
 
         mongo.db.scans.insert_one({
             "user_email": user_email,
@@ -253,6 +315,11 @@ Explain briefly why plagiarism might be detected.
             "timestamp": datetime.utcnow(),
         })
 
+        mongo.db.users.update_one(
+            {"email": user_email},
+            {"$inc": {"scans_count": 1}},
+        )
+
         return jsonify({
             "percentage": score,
             "analysis": detailed_analysis,
@@ -261,12 +328,49 @@ Explain briefly why plagiarism might be detected.
         })
 
     except Exception as e:
+
         print("Analyze error:", e)
+
         return jsonify({"msg": str(e)}), 500
 
 
 # -----------------------------
-# PRELOAD MODEL (IMPORTANT)
+# HISTORY
+# -----------------------------
+@app.route("/history", methods=["GET"])
+@jwt_required()
+def history():
+
+    try:
+
+        user_email = get_jwt_identity()
+
+        scans = mongo.db.scans.find(
+            {"user_email": user_email}
+        ).sort("timestamp", -1)
+
+        output = []
+
+        for s in scans:
+
+            output.append({
+                "id": str(s["_id"]),
+                "full_text": s.get("text", ""),
+                "score": s.get("score", 0),
+                "analysis": s.get("analysis", []),
+                "ai_insight": s.get("ai_insight", ""),
+                "date": s["timestamp"].strftime("%Y-%m-%d")
+                if s.get("timestamp") else "N/A",
+            })
+
+        return jsonify(output)
+
+    except Exception as e:
+        return jsonify({"msg": str(e)}), 500
+
+
+# -----------------------------
+# PRELOAD MODEL
 # -----------------------------
 print("Preloading AI model...")
 get_ai_model()
