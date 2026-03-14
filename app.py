@@ -27,23 +27,21 @@ nltk.download('punkt')
 nltk.download('punkt_tab')
 
 print("⏳ Loading Sentence Transformer (all-MiniLM-L6-v2)...")
-# This loads the model. On the first run, it will download ~80MB.
 ai_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 # Configure Gemini
-GEMINI_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyBiRuD5rmvmUTVecNY335pC85p3Z81Zj5E')
+GEMINI_KEY = os.getenv('GEMINI_API_KEY')
 genai.configure(api_key=GEMINI_KEY)
 gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 print("✅ AI Models Ready.")
 
 # --- DATABASE CONFIG ---
 mongo_uri = os.getenv('MONGO_URI', '').strip()
-if not mongo_uri:
-    print("⚠️ CRITICAL ERROR: MONGO_URI not found in .env file!")
 
 app = Flask(__name__)
-# Relaxed CORS for Hackathon development
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+# --- UPDATED CORS FOR VERCEL FRONTEND ---
+CORS(app, resources={r"/*": {"origins": ["https://plagirism-frontned.vercel.app"]}}, supports_credentials=True)
 
 app.config['MONGO_URI'] = mongo_uri
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'fallback-secret').strip()
@@ -114,7 +112,6 @@ def analyze():
         user_email = get_jwt_identity()
         text_content = ""
 
-        # 1. Content Extraction
         if 'file' in request.files:
             file = request.files['file']
             if file.filename.endswith('.pdf'):
@@ -131,8 +128,6 @@ def analyze():
         text_content = " ".join(text_content.split())
         sentences = nltk.sent_tokenize(text_content)
         
-        # 2. Compare against Database (Safe Retrieval)
-        # We use .get('text') to avoid the KeyError 'text' if old data is buggy
         previous_scans = list(mongo.db.scans.find({}, {"text": 1}).limit(50))
         all_prev_text = " ".join([s.get('text', '') for s in previous_scans if s.get('text')])
         prev_sentences = nltk.sent_tokenize(all_prev_text) if all_prev_text else []
@@ -146,19 +141,15 @@ def analyze():
             sim_matrix = cosine_similarity(curr_embeddings, prev_embeddings)
 
             for i, s in enumerate(sentences):
-                # Find best match in database
                 max_sim = max(sim_matrix[i]) if len(prev_sentences) > 0 else 0
                 is_plag = bool(max_sim > 0.75) 
-                
                 if is_plag: total_plagiarized_count += 1
                 detailed_analysis.append({"text": s, "isPlagiarized": is_plag})
         else:
-            # First scan in database
             detailed_analysis = [{"text": s, "isPlagiarized": False} for s in sentences]
 
         score = int((total_plagiarized_count / len(detailed_analysis)) * 100) if detailed_analysis else 0
 
-        # 3. AI Insights via Gemini
         ai_insight = "Document appears highly original based on current records."
         if score > 15:
             try:
@@ -168,7 +159,6 @@ def analyze():
             except:
                 ai_insight = "AI explanation unavailable at this moment."
 
-        # 4. Save & Update
         mongo.db.scans.insert_one({
             "user_email": user_email,
             "text": text_content,
@@ -186,7 +176,6 @@ def analyze():
             "ai_insight": ai_insight
         })
     except Exception as e:
-        print(f"❌ Error in analyze: {e}")
         return jsonify({"msg": str(e)}), 500
 
 @app.route('/history', methods=['GET'])
@@ -207,10 +196,8 @@ def get_history():
             })
         return jsonify(output), 200
     except Exception as e:
-        print(f"❌ Error in history: {e}")
         return jsonify({"msg": str(e)}), 500
 
 if __name__ == '__main__':
-    # This line is the magic fix for Render
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
