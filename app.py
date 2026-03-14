@@ -1,8 +1,5 @@
 import os
 import re
-import random
-import sys
-import io
 import pdfplumber
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify
@@ -11,7 +8,6 @@ from flask_cors import CORS
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
 from flask_pymongo import PyMongo
 from dotenv import load_dotenv
-from pymongo.errors import ConnectionFailure
 
 # --- AI & SEMANTIC IMPORTS ---
 from sentence_transformers import SentenceTransformer
@@ -22,44 +18,32 @@ import google.generativeai as genai
 load_dotenv()
 
 # --- INITIALIZE AI MODELS ---
-print("⏳ Loading NLTK resources...")
-nltk.download('punkt')
-nltk.download('punkt_tab')
+print("⏳ Preparing AI Environment...")
 
-print("⏳ Loading Sentence Transformer (all-MiniLM-L6-v2)...")
-ai_model = SentenceTransformer('all-MiniLM-L6-v2')
+# USE A LIGHTER MODEL FOR FAST DEPLOYMENT
+print("⏳ Loading Light Semantic Model...")
+ai_model = SentenceTransformer('paraphrase-albert-small-v2')
 
-# Configure Gemini
-GEMINI_KEY = os.getenv('GEMINI_API_KEY')
+# --- ADDED YOUR API KEY HERE ---
+GEMINI_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyBiRuD5rmvmUTVecNY335pC85p3Z81Zj5E')
 genai.configure(api_key=GEMINI_KEY)
 gemini_model = genai.GenerativeModel("gemini-1.5-flash")
 print("✅ AI Models Ready.")
 
-# --- DATABASE CONFIG ---
-mongo_uri = os.getenv('MONGO_URI', '').strip()
-
 app = Flask(__name__)
 
-# --- UPDATED CORS FOR VERCEL FRONTEND ---
+# --- UPDATED CORS FOR VERCEL ---
 CORS(app, resources={r"/*": {"origins": ["https://plagirism-frontned.vercel.app"]}}, supports_credentials=True)
 
-app.config['MONGO_URI'] = mongo_uri
+app.config['MONGO_URI'] = os.getenv('MONGO_URI', '').strip()
 app.config['JWT_SECRET_KEY'] = os.getenv('JWT_SECRET', 'fallback-secret').strip()
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=5) 
 
 mongo = PyMongo(app)
 
-# --- CONNECTION CHECK ---
-try:
-    mongo.cx.admin.command('ping')
-    print("✅ MongoDB Connected Successfully!")
-except Exception as e:
-    print(f"❌ MongoDB Connection Failed: {e}")
-
 bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
-# --- AUTH ROUTES ---
 @app.route('/register', methods=['POST'])
 def register():
     try:
@@ -87,24 +71,6 @@ def login():
     except Exception as e:
         return jsonify({"msg": str(e)}), 500
 
-@app.route('/profile', methods=['GET', 'PUT'])
-@jwt_required()
-def profile():
-    user_email = get_jwt_identity()
-    user = mongo.db.users.find_one({"email": user_email})
-    if not user: return jsonify({"msg": "User not found"}), 404
-    if request.method == 'GET':
-        return jsonify({
-            "name": user.get('name', 'N/A'), 
-            "email": user.get('email'), 
-            "scans": user.get('scans_count', 0)
-        }), 200
-    if request.method == 'PUT':
-        data = request.json
-        mongo.db.users.update_one({"email": user_email}, {"$set": {"name": data.get('name')}})
-        return jsonify({"msg": "Profile updated"}), 200
-
-# --- ANALYZE PART (SEMANTIC AI) ---
 @app.route('/analyze', methods=['POST'])
 @jwt_required()
 def analyze():
@@ -128,7 +94,7 @@ def analyze():
         text_content = " ".join(text_content.split())
         sentences = nltk.sent_tokenize(text_content)
         
-        previous_scans = list(mongo.db.scans.find({}, {"text": 1}).limit(50))
+        previous_scans = list(mongo.db.scans.find({}, {"text": 1}).limit(20))
         all_prev_text = " ".join([s.get('text', '') for s in previous_scans if s.get('text')])
         prev_sentences = nltk.sent_tokenize(all_prev_text) if all_prev_text else []
 
@@ -150,31 +116,22 @@ def analyze():
 
         score = int((total_plagiarized_count / len(detailed_analysis)) * 100) if detailed_analysis else 0
 
-        ai_insight = "Document appears highly original based on current records."
-        if score > 15:
+        ai_insight = "Document appears highly original."
+        if score > 10:
             try:
-                prompt = f"Analyze this plagiarism report. Score: {score}%. Text snippet: {text_content[:600]}. Briefly explain why this might be flagged."
+                prompt = f"Analyze this report. Score: {score}%. Text: {text_content[:300]}. Explain briefly."
                 response = gemini_model.generate_content(prompt)
                 ai_insight = response.text
             except:
-                ai_insight = "AI explanation unavailable at this moment."
+                ai_insight = "AI insight currently unavailable."
 
         mongo.db.scans.insert_one({
-            "user_email": user_email,
-            "text": text_content,
-            "score": score,
-            "analysis": detailed_analysis,
-            "ai_insight": ai_insight,
-            "timestamp": datetime.utcnow()
+            "user_email": user_email, "text": text_content, "score": score,
+            "analysis": detailed_analysis, "ai_insight": ai_insight, "timestamp": datetime.utcnow()
         })
         mongo.db.users.update_one({"email": user_email}, {"$inc": {"scans_count": 1}})
 
-        return jsonify({
-            "percentage": score,
-            "analysis": detailed_analysis,
-            "extracted_text": text_content,
-            "ai_insight": ai_insight
-        })
+        return jsonify({"percentage": score, "analysis": detailed_analysis, "extracted_text": text_content, "ai_insight": ai_insight})
     except Exception as e:
         return jsonify({"msg": str(e)}), 500
 
@@ -187,10 +144,8 @@ def get_history():
         output = []
         for s in scans:
             output.append({
-                "id": str(s['_id']),
-                "full_text": s.get('text', 'No content'), 
-                "score": s.get('score', 0),
-                "analysis": s.get('analysis', []),
+                "id": str(s['_id']), "full_text": s.get('text', 'No content'), 
+                "score": s.get('score', 0), "analysis": s.get('analysis', []),
                 "ai_insight": s.get('ai_insight', ''),
                 "date": s.get('timestamp').strftime("%Y-%m-%d") if s.get('timestamp') else "N/A"
             })
