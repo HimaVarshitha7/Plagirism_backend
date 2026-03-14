@@ -22,7 +22,7 @@ print("⏳ Preparing AI Environment...")
 
 # USE A LIGHTER MODEL FOR FAST DEPLOYMENT
 print("⏳ Loading Light Semantic Model...")
-ai_model = SentenceTransformer('paraphrase-albert-small-v2')
+ai_model = SentenceTransformer('all-MiniLM-L12-v2')
 
 # --- ADDED YOUR API KEY HERE ---
 GEMINI_KEY = os.getenv('GEMINI_API_KEY', 'AIzaSyBiRuD5rmvmUTVecNY335pC85p3Z81Zj5E')
