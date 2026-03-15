@@ -1,12 +1,13 @@
 flask
-flask-bcrypt
 flask-cors
+flask-bcrypt
 flask-jwt-extended
 flask-pymongo
 python-dotenv
 pdfplumber
+nltk
 sentence-transformers
 scikit-learn
-nltk
 google-generativeai
+pymongo
 gunicorn
