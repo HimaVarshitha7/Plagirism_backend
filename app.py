@@ -16,14 +16,15 @@ from dotenv import load_dotenv
 
 import nltk
 from sklearn.metrics.pairwise import cosine_similarity
+from fastembed import TextEmbedding
 import google.generativeai as genai
 
 load_dotenv()
 
 # -----------------------------
-# NLTK SAFE LOAD
+# NLTK SETUP
 # -----------------------------
-NLTK_PATH = "/opt/render/nltk_data"
+NLTK_PATH = os.path.expanduser("~/nltk_data")
 os.makedirs(NLTK_PATH, exist_ok=True)
 nltk.data.path.append(NLTK_PATH)
 
@@ -33,19 +34,11 @@ except LookupError:
     nltk.download("punkt", download_dir=NLTK_PATH)
 
 # -----------------------------
-# AI MODEL
+# AI MODEL (FAST + LIGHT)
 # -----------------------------
-ai_model = None
-
-def get_ai_model():
-    global ai_model
-    if ai_model is None:
-        print("Loading SentenceTransformer model...")
-        from sentence_transformers import SentenceTransformer
-        ai_model = SentenceTransformer("all-MiniLM-L6-v2")
-        print("AI model ready")
-    return ai_model
-
+print("Loading embedding model...")
+embedding_model = TextEmbedding()
+print("Embedding model ready")
 
 # -----------------------------
 # GEMINI
@@ -58,15 +51,14 @@ if GEMINI_KEY:
 else:
     gemini_model = None
 
-
 # -----------------------------
-# FLASK
+# FLASK APP
 # -----------------------------
 app = Flask(__name__)
 
 CORS(
     app,
-    resources={r"/*": {"origins": ["https://plagirism-frontned.vercel.app"]}},
+    resources={r"/*": {"origins": "*"}},  # allow all origins for deployment
     supports_credentials=True,
 )
 
@@ -78,14 +70,12 @@ mongo = PyMongo(app)
 bcrypt = Bcrypt(app)
 jwt = JWTManager(app)
 
-
 # -----------------------------
 # HEALTH ROUTE
 # -----------------------------
 @app.route("/")
 def health():
-    return {"status": "server running"}
-
+    return {"status": "Plagiarism API running"}
 
 # -----------------------------
 # DB CONNECTION TEST
@@ -96,13 +86,11 @@ try:
 except Exception as e:
     print("MongoDB error:", e)
 
-
 # -----------------------------
 # REGISTER
 # -----------------------------
 @app.route("/register", methods=["POST"])
 def register():
-
     try:
         data = request.json
 
@@ -126,13 +114,11 @@ def register():
     except Exception as e:
         return jsonify({"msg": str(e)}), 500
 
-
 # -----------------------------
 # LOGIN
 # -----------------------------
 @app.route("/login", methods=["POST"])
 def login():
-
     try:
         data = request.json
 
@@ -141,7 +127,6 @@ def login():
         if user and bcrypt.check_password_hash(
             user["password"], data.get("password")
         ):
-
             token = create_access_token(identity=user["email"])
 
             return jsonify({
@@ -157,7 +142,6 @@ def login():
     except Exception as e:
         return jsonify({"msg": str(e)}), 500
 
-
 # -----------------------------
 # PROFILE
 # -----------------------------
@@ -172,7 +156,6 @@ def profile():
         return jsonify({"msg": "User not found"}), 404
 
     if request.method == "GET":
-
         return jsonify({
             "name": user.get("name"),
             "email": user.get("email"),
@@ -180,7 +163,6 @@ def profile():
         })
 
     if request.method == "PUT":
-
         data = request.json
 
         mongo.db.users.update_one(
@@ -189,7 +171,6 @@ def profile():
         )
 
         return jsonify({"msg": "Profile updated"})
-
 
 # -----------------------------
 # ANALYZE DOCUMENT
@@ -202,26 +183,21 @@ def analyze():
         user_email = get_jwt_identity()
         text_content = ""
 
-        # File upload
+        # FILE INPUT
         if "file" in request.files:
-
             file = request.files["file"]
 
             if file.filename.endswith(".pdf"):
-
                 with pdfplumber.open(file) as pdf:
-
                     text_content = " ".join(
                         page.extract_text()
                         for page in pdf.pages
                         if page.extract_text()
                     )
-
             else:
                 text_content = file.read().decode("utf-8")
 
         else:
-
             if request.is_json:
                 data = request.get_json()
                 text_content = data.get("text", "")
@@ -246,17 +222,11 @@ def analyze():
         detailed_analysis = []
         plag_count = 0
 
-        model = get_ai_model()
+        # EMBEDDINGS
+        curr_embeddings = list(embedding_model.embed(sentences))
 
         if prev_sentences:
-
-            curr_embeddings = model.encode(
-                sentences, convert_to_numpy=True
-            )
-
-            prev_embeddings = model.encode(
-                prev_sentences, convert_to_numpy=True
-            )
+            prev_embeddings = list(embedding_model.embed(prev_sentences))
 
             sim_matrix = cosine_similarity(
                 curr_embeddings, prev_embeddings
@@ -276,7 +246,6 @@ def analyze():
                 })
 
         else:
-
             detailed_analysis = [
                 {"text": s, "isPlagiarized": False}
                 for s in sentences
@@ -287,9 +256,7 @@ def analyze():
         ai_insight = "Document appears original."
 
         if score > 15 and gemini_model:
-
             try:
-
                 prompt = f"""
 Score: {score}%
 
@@ -298,9 +265,7 @@ Text snippet:
 
 Explain briefly why plagiarism might be detected.
 """
-
                 response = gemini_model.generate_content(prompt)
-
                 ai_insight = response.text
 
             except Exception as e:
@@ -328,11 +293,8 @@ Explain briefly why plagiarism might be detected.
         })
 
     except Exception as e:
-
         print("Analyze error:", e)
-
         return jsonify({"msg": str(e)}), 500
-
 
 # -----------------------------
 # HISTORY
@@ -342,7 +304,6 @@ Explain briefly why plagiarism might be detected.
 def history():
 
     try:
-
         user_email = get_jwt_identity()
 
         scans = mongo.db.scans.find(
@@ -352,7 +313,6 @@ def history():
         output = []
 
         for s in scans:
-
             output.append({
                 "id": str(s["_id"]),
                 "full_text": s.get("text", ""),
@@ -368,20 +328,9 @@ def history():
     except Exception as e:
         return jsonify({"msg": str(e)}), 500
 
-
-# -----------------------------
-# PRELOAD MODEL
-# -----------------------------
-print("Preloading AI model...")
-get_ai_model()
-print("AI ready for requests")
-
-
 # -----------------------------
 # SERVER
 # -----------------------------
 if __name__ == "__main__":
-
     port = int(os.environ.get("PORT", 5000))
-
     app.run(host="0.0.0.0", port=port)

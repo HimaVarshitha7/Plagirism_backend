@@ -6,7 +6,7 @@ flask-pymongo
 python-dotenv
 pdfplumber
 nltk
-sentence-transformers
+fastembed
 scikit-learn
 google-generativeai
 pymongo
